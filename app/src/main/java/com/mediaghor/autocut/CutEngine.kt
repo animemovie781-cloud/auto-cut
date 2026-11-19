@@ -49,7 +49,7 @@ class CutEngine(private val context: Context) {
         uri: Uri,
         fallbackDurationMs: Long,
         cuts: LongArray,
-        cutsPerSecond: Long,
+        intervalSeconds: Long,
         keepRanges: List<ClipRange>?,
         listener: Listener
     ) {
@@ -59,7 +59,7 @@ class CutEngine(private val context: Context) {
         Thread {
             try {
                 runCut(
-                    uri, fallbackDurationMs, cuts, cutsPerSecond,
+                    uri, fallbackDurationMs, cuts, intervalSeconds,
                     keepRanges, listener, generation
                 )
             } catch (error: Throwable) {
@@ -76,7 +76,7 @@ class CutEngine(private val context: Context) {
         uri: Uri,
         fallbackDurationMs: Long,
         cuts: LongArray,
-        cutsPerSecond: Long,
+        intervalSeconds: Long,
         keepRanges: List<ClipRange>?,
         listener: Listener,
         generation: Int
@@ -85,6 +85,7 @@ class CutEngine(private val context: Context) {
         val probeInput = FFmpegKitConfig.getSafParameterForRead(context, uri)
         val probe = FFprobeKit.getMediaInformation(probeInput).mediaInformation
         val tProbe = android.os.SystemClock.elapsedRealtime()
+        val intervalSeconds = intervalSeconds.coerceAtLeast(1L)
         val durationMs = probe?.duration?.toDoubleOrNull()
             ?.let { (it * 1000.0).toLong() }
             ?.takeIf { it > 0L }
@@ -102,7 +103,7 @@ class CutEngine(private val context: Context) {
         val ranges = normalizeRanges(keepRanges, durationMs)
         val wholeVideo = ranges.size == 1 &&
             ranges[0].startMs == 0L && ranges[0].endMs >= durationMs
-        val jobs = planJobs(ranges, maxWorkers, cutsPerSecond, frameIndex)
+        val jobs = planJobs(ranges, maxWorkers, intervalSeconds, frameIndex)
         val workers = jobs.size
         val jobStartMs = LongArray(workers) { jobs[it].startUs / 1000L }
         val jobEndMs = LongArray(workers) { jobs[it].endUs / 1000L }
@@ -111,7 +112,7 @@ class CutEngine(private val context: Context) {
             val spanSec = (ptsUs[ptsUs.size - 1] - ptsUs[0]) / 1_000_000.0
             if (spanSec > 0) {
                 val fps = (ptsUs.size - 1) / spanSec
-                Math.ceil(fps / cutsPerSecond).toLong() + 2
+                Math.ceil(fps * intervalSeconds).toLong() + 2
             } else null
         }
 
@@ -201,7 +202,7 @@ class CutEngine(private val context: Context) {
             }
             val startSec = startUs / 1_000_000.0
             val offsetSeconds =
-                Math.ceil(startSec * cutsPerSecond - 1e-9) / cutsPerSecond - startSec
+                Math.ceil(startSec / intervalSeconds - 1e-9) * intervalSeconds - startSec
             val arguments = mutableListOf(
                 "-y",
                 "-stats_period", "0.2",
@@ -221,7 +222,7 @@ class CutEngine(private val context: Context) {
             if (keyInt != null) arguments += listOf("-g", keyInt.toString())
             arguments += listOf(
                 "-force_key_frames",
-                "expr:gte(t," + decimal(offsetSeconds) + "+n_forced/$cutsPerSecond-0.002)",
+                "expr:gte(t," + decimal(offsetSeconds) + "+n_forced*$intervalSeconds-0.002)",
                 "-avoid_negative_ts", "make_zero",
                 outputs[index].absolutePath
             )
@@ -373,7 +374,7 @@ class CutEngine(private val context: Context) {
     private fun planJobs(
         ranges: List<ClipRange>,
         maxWorkers: Int,
-        cutsPerSecond: Long,
+        intervalSeconds: Long,
         frameIndex: LongArray?
     ): List<Job> {
         val totalMs = ranges.sumOf { it.endMs - it.startMs }.coerceAtLeast(1L)
@@ -386,7 +387,7 @@ class CutEngine(private val context: Context) {
                 val rounded = Math.round(maxWorkers.toDouble() * rangeMs / totalMs)
                 maxOf(1L, rounded).coerceAtMost(maxWorkers.toLong()).toInt()
             }
-            val starts = planRange(range.startMs, range.endMs, desired, cutsPerSecond, frameIndex)
+            val starts = planRange(range.startMs, range.endMs, desired, intervalSeconds, frameIndex)
             for (index in 0 until starts.size - 1) {
                 if (starts[index + 1] > starts[index]) {
                     jobs.add(Job(starts[index], starts[index + 1]))
@@ -403,7 +404,7 @@ class CutEngine(private val context: Context) {
         startMs: Long,
         endMs: Long,
         desiredWorkers: Int,
-        cutsPerSecond: Long,
+        intervalSeconds: Long,
         frameIndex: LongArray?
     ): LongArray {
         val startUs = startMs * 1000L
@@ -421,8 +422,8 @@ class CutEngine(private val context: Context) {
                 val us = if (index == 0) {
                     startUs
                 } else {
-                    val scaled = (startMs + nominalMs * index) * cutsPerSecond / 1000.0
-                    val gridSec = Math.ceil(scaled) / cutsPerSecond
+                    val scaled = (startMs + nominalMs * index) / 1000.0 / intervalSeconds
+                    val gridSec = Math.ceil(scaled) * intervalSeconds
                     firstFrameUsAt(frameIndex, gridSec)
                 }
                 starts[index] = us

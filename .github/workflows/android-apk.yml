@@ -43,7 +43,14 @@ jobs:
 
       - name: Install Android SDK 37
         run: |
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platform-tools" "platforms;android-37" "build-tools;37.0.0"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
+
+          # SDK Manager publishes API 37 as android-37.0, while AGP resolves
+          # compileSdk 37 using the android-37 directory name.
+          if [ -d "$ANDROID_HOME/platforms/android-37.0" ] && [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
+            ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
+          fi
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

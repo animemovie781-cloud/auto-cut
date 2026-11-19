@@ -166,7 +166,7 @@ class CutEngine(private val context: Context) {
                     val tEncode = android.os.SystemClock.elapsedRealtime()
                     Log.d(TAG, "timing encode=${tEncode - t0}ms workers=$workers")
                     val windowsUs = LongArray(workers) { jobs[it].endUs - jobs[it].startUs }
-                    mux(workDir, outputs, windowsUs, audioFile, concatFile, hasAudio, listener, generation)
+                    mux(workDir, outputs, windowsUs, audioFile, concatFile, hasAudio, intervalSeconds, listener, generation)
                     Log.d(
                         TAG,
                         "timing mux=${android.os.SystemClock.elapsedRealtime() - tEncode}ms " +
@@ -304,6 +304,7 @@ class CutEngine(private val context: Context) {
         audioFile: File,
         concatFile: File,
         hasAudio: Boolean,
+        intervalSeconds: Long,
         listener: Listener,
         generation: Int
     ) {
@@ -328,11 +329,16 @@ class CutEngine(private val context: Context) {
         val session = FFmpegKit.executeWithArguments(arguments.toTypedArray())
         if (cancelled || isStale(generation)) return
         if (ReturnCode.isSuccess(session.returnCode)) {
+            val splitOk = splitIntoClips(workDir, intervalSeconds)
+            if (!splitOk) {
+                main.post { if (!cancelled && !isStale(generation)) listener.onCutFailed() }
+                return
+            }
             outputs.forEach { it.delete() }
             audioFile.delete()
             concatFile.delete()
             main.post {
-                if (!cancelled && !isStale(generation)) listener.onCutReady(outputFile())
+                if (!cancelled && !isStale(generation)) listener.onCutReady(clipsDirectory())
             }
         } else {
             Log.e(TAG, "mux failed: ${session.failStackTrace ?: session.output}")
@@ -341,6 +347,45 @@ class CutEngine(private val context: Context) {
             }
         }
     }
+
+
+    /**
+     * Split the finalized timeline into individual MP4 files. Video keyframes were
+     * forced at the selected interval during encoding, so this pass stream-copies
+     * the streams instead of encoding them again.
+     */
+    private fun splitIntoClips(workDir: File, intervalSeconds: Long): Boolean {
+        val directory = clipsDirectory()
+        directory.deleteRecursively()
+        directory.mkdirs()
+        val pattern = File(directory, "clip_%d.mp4").absolutePath
+        val args = arrayOf(
+            "-y",
+            "-i", outputFile().absolutePath,
+            "-map", "0",
+            "-c", "copy",
+            "-f", "segment",
+            "-segment_time", intervalSeconds.coerceAtLeast(1L).toString(),
+            "-segment_time_delta", "0.05",
+            "-reset_timestamps", "1",
+            "-segment_start_number", "1",
+            "-segment_format", "mp4",
+            pattern
+        )
+        val session = FFmpegKit.executeWithArguments(args)
+        val clips = listOfNotNull(directory.listFiles())
+            .filter { it.isFile && it.extension.equals("mp4", ignoreCase = true) && it.length() > 0L }
+            .sortedBy { it.nameWithoutExtension.substringAfterLast('_').toIntOrNull() ?: Int.MAX_VALUE }
+        if (!ReturnCode.isSuccess(session.returnCode) || clips.isEmpty()) {
+            Log.e(TAG, "clip segmentation failed: ${session.failStackTrace ?: session.output}")
+            directory.deleteRecursively()
+            return false
+        }
+        Log.d(TAG, "created ${clips.size} separate clips")
+        return true
+    }
+
+    private fun clipsDirectory(): File = File(File(context.cacheDir, "cut"), "clips")
 
     private class Job(val startUs: Long, val endUs: Long)
 
@@ -546,25 +591,37 @@ class CutEngine(private val context: Context) {
     fun export(fileName: String, listener: Listener) {
         cancelled = false
         Thread {
-            var saved = false
+            var savedCount = 0
             try {
-                saved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    mediaStoreExport(fileName, listener)
-                } else {
-                    legacyExport(fileName, listener)
+                val clips = clipFiles()
+                if (clips.isEmpty()) {
+                    main.post { if (!cancelled) listener.onExportFailed() }
+                    return@Thread
+                }
+                for ((index, clip) in clips.withIndex()) {
+                    if (cancelled) return@Thread
+                    val targetName = "clip_${index + 1}.mp4"
+                    val saved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        mediaStoreExport(clip, targetName, index, clips.size, listener)
+                    } else {
+                        legacyExport(clip, targetName, index, clips.size, listener)
+                    }
+                    if (!saved) {
+                        main.post { if (!cancelled) listener.onExportFailed() }
+                        return@Thread
+                    }
+                    savedCount++
+                    val percent = (savedCount * 100 / clips.size).coerceIn(0, 100)
+                    main.post { if (!cancelled) listener.onExportProgress(percent) }
                 }
             } catch (error: Throwable) {
                 Log.e(TAG, "export error", error)
             }
             if (cancelled) return@Thread
-            if (saved) {
-                main.post {
-                    if (!cancelled) listener.onExportSaved(fileName)
-                }
+            if (savedCount > 0) {
+                main.post { if (!cancelled) listener.onExportSaved("$savedCount clips") }
             } else {
-                main.post {
-                    if (!cancelled) listener.onExportFailed()
-                }
+                main.post { if (!cancelled) listener.onExportFailed() }
             }
         }.start()
     }
@@ -573,10 +630,21 @@ class CutEngine(private val context: Context) {
         cancelled = true
     }
 
-    fun outputExists(): Boolean = outputFile().exists() && outputFile().length() > 0L
+    fun outputExists(): Boolean = clipFiles().isNotEmpty()
+
+    private fun clipFiles(): List<File> = clipsDirectory().listFiles()
+        ?.filter { it.isFile && it.extension.equals("mp4", ignoreCase = true) && it.length() > 0L }
+        ?.sortedBy { it.nameWithoutExtension.substringAfterLast('_').toIntOrNull() ?: Int.MAX_VALUE }
+        ?: emptyList()
 
     @RequiresApi(Build.VERSION_CODES.Q)
-    private fun mediaStoreExport(fileName: String, listener: Listener): Boolean {
+    private fun mediaStoreExport(
+        source: File,
+        fileName: String,
+        clipIndex: Int,
+        clipCount: Int,
+        listener: Listener
+    ): Boolean {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
@@ -584,14 +652,13 @@ class CutEngine(private val context: Context) {
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-            ?: return false
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return false
         try {
-            val stream = resolver.openOutputStream(uri) ?: return false.also {
+            val stream = resolver.openOutputStream(uri) ?: run {
                 resolver.delete(uri, null, null)
+                return false
             }
-            val total = outputFile().length()
-            val ok = stream.use { writeStream(it, total, listener) }
+            val ok = stream.use { writeStream(source, it, clipIndex, clipCount, listener) }
             if (!ok) {
                 resolver.delete(uri, null, null)
                 return false
@@ -606,30 +673,39 @@ class CutEngine(private val context: Context) {
         }
     }
 
-    private fun legacyExport(fileName: String, listener: Listener): Boolean {
-        val directory = Environment.getExternalStoragePublicDirectory(
-            Environment.DIRECTORY_DOWNLOADS
-        )
+    private fun legacyExport(
+        source: File,
+        fileName: String,
+        clipIndex: Int,
+        clipCount: Int,
+        listener: Listener
+    ): Boolean {
+        val directory = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         if (!directory.exists()) directory.mkdirs()
         val target = File(directory, fileName)
         try {
-            val total = outputFile().length()
-            val ok = FileOutputStream(target).use { writeStream(it, total, listener) }
-            if (!ok) {
-                target.delete()
-                return false
+            val ok = FileOutputStream(target).use {
+                writeStream(source, it, clipIndex, clipCount, listener)
             }
-            return true
+            if (!ok) target.delete()
+            return ok
         } catch (error: Throwable) {
             target.delete()
             throw error
         }
     }
 
-    private fun writeStream(out: OutputStream, total: Long, listener: Listener): Boolean {
+    private fun writeStream(
+        source: File,
+        out: OutputStream,
+        clipIndex: Int,
+        clipCount: Int,
+        listener: Listener
+    ): Boolean {
         var copied = 0L
         var lastPercent = -1
-        FileInputStream(outputFile()).use { input ->
+        val total = source.length()
+        FileInputStream(source).use { input ->
             val buffer = ByteArray(512 * 1024)
             while (true) {
                 if (cancelled) return false
@@ -637,16 +713,11 @@ class CutEngine(private val context: Context) {
                 if (read < 0) break
                 out.write(buffer, 0, read)
                 copied += read
-                val percent = if (total > 0L) {
-                    (copied * 100 / total).toInt()
-                } else {
-                    0
-                }.coerceIn(0, 99)
-                if (percent != lastPercent) {
-                    lastPercent = percent
-                    main.post {
-                        if (!cancelled) listener.onExportProgress(percent)
-                    }
+                val filePercent = if (total > 0L) copied * 100 / total else 0L
+                val overall = ((clipIndex * 100L + filePercent) / clipCount).toInt().coerceIn(0, 99)
+                if (overall != lastPercent) {
+                    lastPercent = overall
+                    main.post { if (!cancelled) listener.onExportProgress(overall) }
                 }
             }
             out.flush()

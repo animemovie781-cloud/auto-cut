@@ -1,9 +1,7 @@
 package com.mediaghor.autocut
 
-import android.Manifest
 import android.app.Dialog
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.media.MediaMetadataRetriever
@@ -27,10 +25,9 @@ import android.widget.TextView
 import android.widget.Toast
 import android.widget.VideoView
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.arthenica.ffmpegkit.FFmpegKitConfig
@@ -73,6 +70,22 @@ class EditActivity : AppCompatActivity() {
     private var videoFps = 0
     private var probedDurationMs = 0L
     private val engine by lazy { CutEngine(applicationContext) }
+    private val folderPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
+        if (treeUri == null) {
+            Toast.makeText(this, R.string.cut_folder_cancelled, Toast.LENGTH_SHORT).show()
+        } else {
+            try {
+                contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+                beginExportToFolder(treeUri)
+            } catch (error: Exception) {
+                Log.e(TAG, "folder permission error", error)
+                Toast.makeText(this, R.string.cut_error_export, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
     private var cutState = CutState.IDLE
     private var cutTimes = LongArray(0)
     private var autoExport = false
@@ -698,24 +711,16 @@ class EditActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.cut_export_none, Toast.LENGTH_SHORT).show()
             return
         }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
-                REQUEST_STORAGE
-            )
-            return
-        }
+        folderPicker.launch(null)
+    }
+
+    private fun beginExportToFolder(parentTreeUri: Uri) {
+        if (cutState == CutState.CUTTING || cutState == CutState.EXPORTING) return
         cutState = CutState.EXPORTING
         showExportingDialog()
-        val name = "AutoCut_" +
-            SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
-        engine.export(name, cutListener)
+        val folderName = "AutoCut_" +
+            SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        engine.export(parentTreeUri, folderName, cutListener)
     }
 
     private fun closeCutDialog() {
@@ -828,20 +833,6 @@ class EditActivity : AppCompatActivity() {
         }
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != REQUEST_STORAGE) return
-        if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            startExport()
-        } else {
-            Toast.makeText(this, R.string.cut_permission_denied, Toast.LENGTH_SHORT).show()
-        }
-    }
-
     override fun onResume() {
         super.onResume()
         if (prepared) {
@@ -875,7 +866,6 @@ class EditActivity : AppCompatActivity() {
         private const val CONTROLS_HIDE_MS = 3000L
         private const val DIALOG_DIM = 0.55f
         private const val DIALOG_WIDTH_FRACTION = 0.86f
-        private const val REQUEST_STORAGE = 41
         private const val FINALIZING_PERCENT = 99
     }
 }

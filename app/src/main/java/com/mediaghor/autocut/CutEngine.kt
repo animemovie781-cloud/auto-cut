@@ -373,9 +373,10 @@ class CutEngine(private val context: Context) {
             pattern
         )
         val session = FFmpegKit.executeWithArguments(args)
-        val clips = listOfNotNull(directory.listFiles())
-            .filter { it.isFile && it.extension.equals("mp4", ignoreCase = true) && it.length() > 0L }
-            .sortedBy { it.nameWithoutExtension.substringAfterLast('_').toIntOrNull() ?: Int.MAX_VALUE }
+        val clips = directory.listFiles()
+            ?.filter { it.isFile && it.extension.equals("mp4", ignoreCase = true) && it.length() > 0L }
+            ?.sortedBy { it.nameWithoutExtension.substringAfterLast('_').toIntOrNull() ?: Int.MAX_VALUE }
+            ?: emptyList()
         if (!ReturnCode.isSuccess(session.returnCode) || clips.isEmpty()) {
             Log.e(TAG, "clip segmentation failed: ${session.failStackTrace ?: session.output}")
             directory.deleteRecursively()

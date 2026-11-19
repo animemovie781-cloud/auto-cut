@@ -595,8 +595,12 @@ class CutEngine(private val context: Context) {
                     return@Thread
                 }
                 val resolver = context.contentResolver
+                val parentDocumentUri = DocumentsContract.buildDocumentUriUsingTree(
+                    parentTreeUri,
+                    DocumentsContract.getTreeDocumentId(parentTreeUri)
+                )
                 val folderUri = DocumentsContract.createDocument(
-                    resolver, parentTreeUri, DocumentsContract.Document.MIME_TYPE_DIR, folderName
+                    resolver, parentDocumentUri, DocumentsContract.Document.MIME_TYPE_DIR, folderName
                 ) ?: throw IllegalStateException("Could not create export folder")
                 for ((index, clip) in clips.withIndex()) {
                     if (cancelled) return@Thread

@@ -14,7 +14,7 @@ class CutDensityPreviewView @JvmOverloads constructor(
 ) : View(context, attrs) {
 
     private val density = resources.displayMetrics.density
-    private var cutsPerSecond = AppSettings.DEFAULT_CUTS_PER_SECOND
+    private var cutsPerSecond = AppSettings.DEFAULT_INTERVAL_SECONDS
 
     private val radius = dp(12f)
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {

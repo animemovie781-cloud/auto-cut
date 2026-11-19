@@ -37,7 +37,7 @@
     <string name="cut_done_status">%1$d cuts applied to your video</string>
     <string name="cut_exporting_title">Exporting…</string>
     <string name="cut_exporting_status">Saving to Download</string>
-    <string name="cut_exported">Saved to Download/%1$s</string>
+    <string name="cut_exported">Saved %1$s in Downloads</string>
     <string name="cut_export_btn">Export</string>
     <string name="cut_close_btn">Close</string>
     <string name="cut_cancel_btn">Cancel</string>

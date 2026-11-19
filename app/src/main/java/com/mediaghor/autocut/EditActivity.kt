@@ -571,7 +571,7 @@ class EditActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.cut_bad_video, Toast.LENGTH_SHORT).show()
             return
         }
-        val cps = effectiveCutsPerSecond()
+        val intervalSeconds = AppSettings.cutIntervalSeconds(this)
         val duration = durationMs.toLong()
         val kept = if (clipModel.count == 0) {
             listOf(ClipRange(0L, duration))
@@ -580,7 +580,7 @@ class EditActivity : AppCompatActivity() {
         }
         val wholeClip = kept.size == 1 && kept[0].startMs == 0L && kept[0].endMs >= duration
         val cuts = if (wholeClip) {
-            buildCuts(durationMs, cps)
+            buildCuts(durationMs, intervalSeconds)
         } else {
             buildCuts(durationMs, cps)
                 .filter { time -> kept.any { time >= it.startMs && time < it.endMs } }
@@ -597,25 +597,14 @@ class EditActivity : AppCompatActivity() {
         setActionButtonsEnabled(false)
         timeline.setCutMarks(cuts, Long.MIN_VALUE)
         showCuttingDialog(cuts.size)
-        engine.cut(uri, duration, cuts, cps.toLong(), kept, cutListener)
+        engine.cut(uri, duration, cuts, intervalSeconds.toLong(), kept, cutListener)
     }
 
-    private fun effectiveCutsPerSecond(): Int {
-        val preference = AppSettings.cutsPerSecond(this)
-        val frameRateLimit = (videoFps.takeIf { it > 0 }
-            ?: AppSettings.lastVideoFps(this).takeIf { it > 0 }
-            ?: AppSettings.DEFAULT_MAX_FPS)
-            .coerceAtLeast(1)
-        val max = minOf(AppSettings.MAX_CUTS_PER_SECOND, frameRateLimit)
-        return preference.coerceIn(AppSettings.MIN_CUTS_PER_SECOND, max)
-    }
-
-    private fun buildCuts(durationMs: Int, cutsPerSecond: Int): LongArray {
-        val count = (durationMs.toLong() * cutsPerSecond) / 1000L
+    private fun buildCuts(durationMs: Int, intervalSeconds: Int): LongArray {
+        val intervalMs = intervalSeconds.coerceAtLeast(1).toLong() * 1000L
+        val count = durationMs.toLong() / intervalMs
         if (count <= 0L) return LongArray(0)
-        return LongArray(count.toInt()) { index ->
-            (index + 1) * 1000L / cutsPerSecond
-        }
+        return LongArray(count.toInt()) { index -> (index + 1L) * intervalMs }
     }
 
     private fun ensureCutDialog(): Dialog {

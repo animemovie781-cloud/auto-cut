@@ -1,15 +1,12 @@
 package com.mediaghor.autocut
 
-import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
-import android.os.Build
-import android.os.Environment
+import android.provider.DocumentsContract
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
-import androidx.annotation.RequiresApi
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.FFmpegSession
@@ -18,7 +15,6 @@ import com.arthenica.ffmpegkit.MediaInformation
 import com.arthenica.ffmpegkit.ReturnCode
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.io.OutputStream
 import java.math.BigDecimal
 import java.math.RoundingMode
@@ -589,120 +585,55 @@ class CutEngine(private val context: Context) {
         }
     }
 
-    fun export(fileName: String, listener: Listener) {
+    fun export(parentTreeUri: Uri, folderName: String, listener: Listener) {
         cancelled = false
         Thread {
-            var savedCount = 0
             try {
                 val clips = clipFiles()
                 if (clips.isEmpty()) {
                     main.post { if (!cancelled) listener.onExportFailed() }
                     return@Thread
                 }
+                val resolver = context.contentResolver
+                val folderUri = DocumentsContract.createDocument(
+                    resolver, parentTreeUri, DocumentsContract.Document.MIME_TYPE_DIR, folderName
+                ) ?: throw IllegalStateException("Could not create export folder")
                 for ((index, clip) in clips.withIndex()) {
                     if (cancelled) return@Thread
-                    val targetName = "clip_${index + 1}.mp4"
-                    val saved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        mediaStoreExport(clip, targetName, index, clips.size, listener)
-                    } else {
-                        legacyExport(clip, targetName, index, clips.size, listener)
+                    val fileName = "clip_${index + 1}.mp4"
+                    val fileUri = DocumentsContract.createDocument(resolver, folderUri, "video/mp4", fileName)
+                        ?: throw IllegalStateException("Could not create $fileName")
+                    val output = resolver.openOutputStream(fileUri, "w")
+                    if (output == null) {
+                        DocumentsContract.deleteDocument(resolver, fileUri)
+                        throw IllegalStateException("Could not open $fileName")
                     }
-                    if (!saved) {
-                        main.post { if (!cancelled) listener.onExportFailed() }
+                    val copied = output.use { writeStream(clip, it, index, clips.size, listener) }
+                    if (!copied) {
+                        DocumentsContract.deleteDocument(resolver, fileUri)
                         return@Thread
                     }
-                    savedCount++
-                    val percent = (savedCount * 100 / clips.size).coerceIn(0, 100)
+                    val percent = ((index + 1) * 100 / clips.size).coerceIn(0, 100)
                     main.post { if (!cancelled) listener.onExportProgress(percent) }
                 }
+                if (!cancelled) main.post { if (!cancelled) listener.onExportSaved("$folderName (${clips.size} clips)") }
             } catch (error: Throwable) {
-                Log.e(TAG, "export error", error)
-            }
-            if (cancelled) return@Thread
-            if (savedCount > 0) {
-                main.post { if (!cancelled) listener.onExportSaved("$savedCount clips") }
-            } else {
-                main.post { if (!cancelled) listener.onExportFailed() }
+                Log.e(TAG, "export to selected folder failed", error)
+                if (!cancelled) main.post { listener.onExportFailed() }
             }
         }.start()
     }
 
-    fun cancelExport() {
-        cancelled = true
-    }
+    fun cancelExport() { cancelled = true }
 
     fun outputExists(): Boolean = clipFiles().isNotEmpty()
 
     private fun clipFiles(): List<File> = clipsDirectory().listFiles()
         ?.filter { it.isFile && it.extension.equals("mp4", ignoreCase = true) && it.length() > 0L }
-        ?.sortedBy { it.nameWithoutExtension.substringAfterLast('_').toIntOrNull() ?: Int.MAX_VALUE }
+        ?.sortedBy { it.nameWithoutExtension.substringAfterLast("_").toIntOrNull() ?: Int.MAX_VALUE }
         ?: emptyList()
 
-    @RequiresApi(Build.VERSION_CODES.Q)
-    private fun mediaStoreExport(
-        source: File,
-        fileName: String,
-        clipIndex: Int,
-        clipCount: Int,
-        listener: Listener
-    ): Boolean {
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
-        }
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return false
-        try {
-            val stream = resolver.openOutputStream(uri) ?: run {
-                resolver.delete(uri, null, null)
-                return false
-            }
-            val ok = stream.use { writeStream(source, it, clipIndex, clipCount, listener) }
-            if (!ok) {
-                resolver.delete(uri, null, null)
-                return false
-            }
-            values.clear()
-            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
-            return true
-        } catch (error: Throwable) {
-            resolver.delete(uri, null, null)
-            throw error
-        }
-    }
-
-    private fun legacyExport(
-        source: File,
-        fileName: String,
-        clipIndex: Int,
-        clipCount: Int,
-        listener: Listener
-    ): Boolean {
-        val directory = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        if (!directory.exists()) directory.mkdirs()
-        val target = File(directory, fileName)
-        try {
-            val ok = FileOutputStream(target).use {
-                writeStream(source, it, clipIndex, clipCount, listener)
-            }
-            if (!ok) target.delete()
-            return ok
-        } catch (error: Throwable) {
-            target.delete()
-            throw error
-        }
-    }
-
-    private fun writeStream(
-        source: File,
-        out: OutputStream,
-        clipIndex: Int,
-        clipCount: Int,
-        listener: Listener
-    ): Boolean {
+    private fun writeStream(source: File, out: OutputStream, clipIndex: Int, clipCount: Int, listener: Listener): Boolean {
         var copied = 0L
         var lastPercent = -1
         val total = source.length()

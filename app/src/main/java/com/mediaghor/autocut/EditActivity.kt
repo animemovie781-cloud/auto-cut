@@ -582,7 +582,7 @@ class EditActivity : AppCompatActivity() {
         val cuts = if (wholeClip) {
             buildCuts(durationMs, intervalSeconds)
         } else {
-            buildCuts(durationMs, cps)
+            buildCuts(durationMs, intervalSeconds)
                 .filter { time -> kept.any { time >= it.startMs && time < it.endMs } }
                 .toLongArray()
         }

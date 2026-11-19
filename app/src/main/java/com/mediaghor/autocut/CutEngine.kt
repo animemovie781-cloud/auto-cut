@@ -85,7 +85,6 @@ class CutEngine(private val context: Context) {
         val probeInput = FFmpegKitConfig.getSafParameterForRead(context, uri)
         val probe = FFprobeKit.getMediaInformation(probeInput).mediaInformation
         val tProbe = android.os.SystemClock.elapsedRealtime()
-        val intervalSeconds = intervalSeconds.coerceAtLeast(1L)
         val durationMs = probe?.duration?.toDoubleOrNull()
             ?.let { (it * 1000.0).toLong() }
             ?.takeIf { it > 0L }
